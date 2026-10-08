@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Сквозь Кадр — Merge Studio</title>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#080a10;color:#fff;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+body{display:flex;flex-direction:column}
+#top{height:52px;flex:none;display:flex;align-items:center;gap:7px;padding:6px 8px;background:#141824;border-bottom:1px solid #2a3145;overflow-x:auto}
+button{border:0;border-radius:9px;padding:9px 12px;background:#29324a;color:#fff;font-weight:700;white-space:nowrap}
+button:active{transform:scale(.97)}
+#start{background:#ff4f91;color:#16050c}
+#record.on{background:#e22b35}
+#game{position:relative;flex:1;min-height:0;display:flex;justify-content:center;align-items:center;background:#080a10}
+canvas{display:block;height:100%;width:auto;max-width:100%;aspect-ratio:9/16}
+#settings{
+position:absolute;left:8px;right:8px;bottom:8px;max-height:48vh;overflow:auto;
+background:rgba(18,22,34,.96);border:1px solid #303850;border-radius:14px;
+padding:10px;backdrop-filter:blur(10px);display:none;z-index:5
+}
+#settings.open{display:block}
+h3{margin:4px 0 8px;font-size:15px}
+.row{display:flex;justify-content:space-between;align-items:center;gap:10px;margin:7px 0;color:#b9c1d8;font-size:13px}
+input,select{width:120px;background:#0e1220;color:#fff;border:1px solid #39435f;border-radius:7px;padding:6px}
+input[type=color]{padding:1px;height:32px}
+#status{position:absolute;top:7px;left:50%;transform:translateX(-50%);font-size:12px;background:#0008;padding:5px 9px;border-radius:99px;z-index:4;white-space:nowrap}
+#help{position:absolute;bottom:8px;left:50%;transform:translateX(-50%);font-size:11px;color:#aeb7ce;background:#0007;padding:5px 8px;border-radius:99px;z-index:3;pointer-events:none}
+</style>
+</head>
+<body>
+<div id="top">
+<button id="start">▶ Start</button>
+<button id="pause">Ⅱ Pause</button>
+<button id="reset">↻ Reset</button>
+<button id="random">🎲 Random</button>
+<button id="record">● Record</button>
+<button id="export" disabled>⬇ Export</button>
+<button id="settingsBtn">⚙ Settings</button>
+</div>
+<div id="game">
+<canvas id="cv" width="540" height="960"></canvas>
+<div id="status">Paused · balls 0 · merges 0</div>
+<div id="help">Нажми Start — шарики начнут падать</div>
+<div id="settings">
+<h3>Настройки</h3>
+<div class="row">Скорость <input id="speed" type="range" min=".2" max="2.5" step=".1" value="1"></div>
+<div class="row">Гравитация <input id="gravity" type="range" min="400" max="3500" step="50" value="1800"></div>
+<div class="row">Шариков/сек <input id="rate" type="range" min=".5" max="12" step=".5" value="3"></div>
+<div class="row">Отскок <input id="rest" type="range" min="0" max=".8" step=".05" value=".35"></div>
+<div class="row">Уровней <input id="levels" type="range" min="4" max="12" step="1" value="8"></div>
+<div class="row">Цвет фона <input id="bg" type="color" value="#17102b"></div>
+<div class="row">Показывать уровни <input id="nums" type="checkbox" checked></div>
+<div class="row">Звук <input id="sound" type="checkbox" checked></div>
+</div>
+</div>
+
+<script>
+const canvas=document.getElementById('cv'),ctx=canvas.getContext('2d');
+const startBtn=document.getElementById('start'), pauseBtn=document.getElementById('pause');
+const resetBtn=document.getElementById('reset'), randomBtn=document.getElementById('random');
+const recBtn=document.getElementById('record'), expBtn=document.getElementById('export');
+const settingsBtn=document.getElementById('settingsBtn'), settings=document.getElementById('settings');
+const status=document.getElementById('status');
+
+let W=540,H=960,balls=[],particles=[],running=false,merges=0,last=0,spawnTimer=0;
+let recorder=null,chunks=[],recordedBlob=null,audioCtx=null,audioDest=null;
+let S={speed:1,gravity:1800,rate:3,rest:.35,levels:8,bg:'#17102b',nums:true,sound:true};
+let sizes=[],colors=[];
+
+function resizeCanvas(){
+  const r=canvas.getBoundingClientRect();
+  const d=Math.min(devicePixelRatio||1,2);
+  canvas.width=Math.round(r.width*d); canvas.height=Math.round(r.height*d);
+  W=540;H=960;
+}
+function hsl(h,s,l){h=((h%360)+360)%360;s/=100;l/=100;const k=n=>(n+h/30)%12,a=s*Math.min(l,1-l),f=n=>l-a*Math.max(-1,Math.min(k(n)-3,Math.min(9-k(n),1)));return '#'+[f(0),f(8),f(4)].map(x=>Math.round(x*255).toString(16).padStart(2,'0')).join('')}
+function makeLevels(){
+  sizes=[];colors=[];
+  for(let i=0;i<S.levels;i++){
+    sizes.push(12*Math.pow(1.27,i));
+    colors.push(hsl(335+i*35,80,60));
+  }
+}
+function reset(){
+  balls=[];particles=[];merges=0;spawnTimer=0;
+  running=false; recordedBlob=null; expBtn.disabled=true;
+}
+function spawn(){
+  const level=Math.floor(Math.random()*Math.min(3,S.levels));
+  const r=sizes[level];
+  balls.push({x:270+(Math.random()-.5)*100,y:70,r,level,vx:(Math.random()-.5)*80,vy:80,dead:false});
+}
+function merge(a,b){
+  a.dead=b.dead=true;
+  const next=a.level+1;
+  merges++;
+  if(next>=S.levels){burst((a.x+b.x)/2,(a.y+b.y)/2,colors[a.level]); beep(300+a.level*40); return;}
+  const x=(a.x+b.x)/2,y=(a.y+b.y)/2;
+  balls.push({x,y,r:sizes[next],level:next,vx:(a.vx+b.vx)/2,vy:(a.vy+b.vy)/2-100,dead:false,pop:.2});
+  burst(x,y,colors[next]); beep(300+next*45);
+}
+function burst(x,y,c){
+  for(let i=0;i<18;i++){let a=Math.random()*Math.PI*2,v=80+Math.random()*240;particles.push({x,y,vx:Math.cos(a)*v,vy:Math.sin(a)*v,life:.6,c})}
+}
+function beep(freq){
+  if(!S.sound)return;
+  try{
+    if(!audioCtx){audioCtx=new AudioContext();audioDest=audioCtx.createMediaStreamDestination();}
+    if(audioCtx.state==='suspended')audioCtx.resume();
+    const o=audioCtx.createOscillator(),g=audioCtx.createGain();
+    o.frequency.value=freq;g.gain.value=.04;o.connect(g);g.connect(audioCtx.destination);g.connect(audioDest);
+    o.start();g.gain.exponentialRampToValueAtTime(.0001,audioCtx.currentTime+.12);o.stop(audioCtx.currentTime+.13);
+  }catch(e){}
+}
+function physics(dt){
+  spawnTimer+=dt*S.rate;
+  while(spawnTimer>=1 && balls.length<100){spawnTimer--;spawn()}
+  for(const b of balls){
+    b.vy+=S.gravity*dt;b.x+=b.vx*dt;b.y+=b.vy*dt;
+    const left=75,right=465,bottom=830;
+    if(b.x-b.r<left){b.x=left+b.r;b.vx=Math.abs(b.vx)*S.rest}
+    if(b.x+b.r>right){b.x=right-b.r;b.vx=-Math.abs(b.vx)*S.rest}
+    if(b.y+b.r>bottom){b.y=bottom-b.r;b.vy=-Math.abs(b.vy)*S.rest;b.vx*=.995}
+    if(b.y-b.r<55){b.y=55+b.r;b.vy=Math.abs(b.vy)*.5}
+  }
+  for(let i=0;i<balls.length;i++){
+    const a=balls[i]; if(a.dead)continue;
+    for(let j=i+1;j<balls.length;j++){
+      const b=balls[j];if(b.dead)continue;
+      const dx=b.x-a.x,dy=b.y-a.y,d=Math.hypot(dx,dy),rr=a.r+b.r;
+      if(d<rr){
+        if(a.level===b.level){merge(a,b);break}
+        const nx=(dx||1)/d,ny=(dy||0)/d,over=rr-d;
+        a.x-=nx*over*.5;a.y-=ny*over*.5;b.x+=nx*over*.5;b.y+=ny*over*.5;
+        const rel=(b.vx-a.vx)*nx+(b.vy-a.vy)*ny;
+        if(rel<0){a.vx-=rel*nx*.5;a.vy-=rel*ny*.5;b.vx+=rel*nx*.5;b.vy+=rel*ny*.5}
+      }
+    }
+  }
+  balls=balls.filter(b=>!b.dead);
+  for(const p of particles){p.x+=p.vx*dt;p.y+=p.vy*dt;p.vy+=500*dt;p.life-=dt}
+  particles=particles.filter(p=>p.life>0);
+}
+function draw(){
+  ctx.setTransform(canvas.width/W,0,0,canvas.height/H,0,0);
+  const g=ctx.createLinearGradient(0,0,0,H);g.addColorStop(0,S.bg);g.addColorStop(1,'#05060a');
+  ctx.fillStyle=g;ctx.fillRect(0,0,W,H);
+  ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.font='800 30px system-ui';ctx.fillStyle='#fff';ctx.fillText('СКВОЗЬ КАДР',270,35);
+  ctx.font='800 34px system-ui';ctx.fillText('Merge to the top!',270,105);
+  ctx.font='700 20px system-ui';ctx.fillStyle='#ffffffaa';ctx.fillText('Merges: '+merges,270,140);
+  ctx.beginPath();ctx.moveTo(75,180);ctx.lineTo(75,830);ctx.quadraticCurveTo(270,880,465,830);ctx.lineTo(465,180);
+  ctx.strokeStyle='#fff';ctx.lineWidth=8;ctx.stroke();
+  ctx.fillStyle='#ffffff08';ctx.fill();
+  for(const b of balls){
+    const grad=ctx.createRadialGradient(b.x-b.r*.35,b.y-b.r*.4,2,b.x,b.y,b.r);
+    grad.addColorStop(0,'#fff');grad.addColorStop(.2,colors[b.level]);grad.addColorStop(1,'#111');
+    ctx.fillStyle=grad;ctx.beginPath();ctx.arc(b.x,b.y,b.r,0,Math.PI*2);ctx.fill();
+    ctx.strokeStyle='#ffffff55';ctx.lineWidth=2;ctx.stroke();
+    if(S.nums){ctx.fillStyle='#fff';ctx.font='800 '+Math.max(12,b.r*.65)+'px system-ui';ctx.fillText(b.level+1,b.x,b.y)}
+  }
+  for(const p of particles){ctx.globalAlpha=Math.max(0,p.life/.6);ctx.fillStyle=p.c;ctx.beginPath();ctx.arc(p.x,p.y,4,0,Math.PI*2);ctx.fill()}
+  ctx.globalAlpha=1;
+}
+function loop(t){
+  const dt=Math.min((t-last)/1000||0,.033);last=t;
+  if(running)physics(dt);
+  draw();
+  status.textContent=(running?'Running':'Paused')+' · balls '+balls.length+' · merges '+merges;
+  requestAnimationFrame(loop);
+}
+startBtn.onclick=()=>{running=true;beep(520)};
+pauseBtn.onclick=()=>running=false;
+resetBtn.onclick=()=>reset();
+randomBtn.onclick=()=>{
+  S.gravity=700+Math.random()*2400;
+  S.rate=1+Math.random()*6;
+  S.rest=Math.random()*.6;
+  S.levels=5+Math.floor(Math.random()*6);
+  S.bg=hsl(Math.random()*360,45,10);
+  document.getElementById('gravity').value=S.gravity;
+  document.getElementById('rate').value=S.rate;
+  document.getElementById('rest').value=S.rest;
+  document.getElementById('levels').value=S.levels;
+  document.getElementById('bg').value=S.bg;
+  makeLevels();reset();running=true;
+};
+settingsBtn.onclick=()=>settings.classList.toggle('open');
+document.getElementById('speed').oninput=e=>S.speed=+e.target.value;
+document.getElementById('gravity').oninput=e=>S.gravity=+e.target.value;
+document.getElementById('rate').oninput=e=>S.rate=+e.target.value;
+document.getElementById('rest').oninput=e=>S.rest=+e.target.value;
+document.getElementById('levels').oninput=e=>{S.levels=+e.target.value;makeLevels()};
+document.getElementById('bg').oninput=e=>S.bg=e.target.value;
+document.getElementById('nums').onchange=e=>S.nums=e.target.checked;
+document.getElementById('sound').onchange=e=>S.sound=e.target.checked;
+
+recBtn.onclick=()=>{
+  if(recorder){recorder.stop();return}
+  try{
+    beep(600);
+    const stream=canvas.captureStream(30);
+    if(audioDest) audioDest.stream.getAudioTracks().forEach(t=>stream.addTrack(t));
+    const type=MediaRecorder.isTypeSupported('video/mp4')?'video/mp4':(MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')?'video/webm;codecs=vp9,opus':'video/webm');
+    recorder=new MediaRecorder(stream,{mimeType:type});
+    chunks=[];
+    recorder.ondataavailable=e=>{if(e.data.size)chunks.push(e.data)};
+    recorder.onstop=()=>{
+      recordedBlob=new Blob(chunks,{type});
+      expBtn.disabled=false;recorder=null;recBtn.textContent='● Record';recBtn.classList.remove('on');
+    };
+    recorder.start();recBtn.textContent='■ Stop';recBtn.classList.add('on');
+  }catch(e){alert('Запись не поддерживается этим браузером. Попробуй Chrome.')}
+};
+expBtn.onclick=()=>{
+  if(!recordedBlob)return;
+  const a=document.createElement('a');a.href=URL.createObjectURL(recordedBlob);
+  a.download='skvoz-kadr-merge.'+(recordedBlob.type.includes('mp4')?'mp4':'webm');a.click();
+};
+makeLevels();resizeCanvas();window.addEventListener('resize',resizeCanvas);reset();requestAnimationFrame(loop);
+</script>
+</body>
+</html>
